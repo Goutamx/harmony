@@ -1717,6 +1717,8 @@ const DOM = {};
 
 const App={
   db:null,audio:new Audio(),songs:[],playlists:[],queue:[],queueIndex:-1,
+  librarySortedSongs:[],
+  searchResults:[],
   queueContext:'Library',isPlaying:false,shuffle:false,repeat:'none',
   currentSong:null,currentView:'home',theme:'dark',volume:1,
   songForPlaylist:null,detailArtist:null,detailAlbum:null,detailPlaylist:null,
@@ -1880,17 +1882,21 @@ function getUniqueArtists() {
     }
   });
   
-  const results = [];
-  
-  duoMap.forEach(duo => results.push(duo));
-  
-  soloMap.forEach(solo => {
-    if (solo.songCount >= INDIVIDUAL_ARTIST_THRESHOLD) {
-      results.push(solo);
-    }
-  });
-  
-  return results.sort((a, b) => b.songCount - a.songCount);
+const results = [];
+
+duoMap.forEach(duo => {
+  if (duo.songCount >= 2) {
+    results.push(duo);
+  }
+});
+
+soloMap.forEach(solo => {
+  if (solo.songCount >= INDIVIDUAL_ARTIST_THRESHOLD) {
+    results.push(solo);
+  }
+});
+
+return results.sort((a, b) => b.songCount - a.songCount);
 }
 
 function getSongsByArtistKey(key) {
@@ -3242,6 +3248,7 @@ function renderSearchContent(q) {
   q = q.toLowerCase().trim();
   
   if (!q) {
+    App.searchResults = [];
     DOM.searchContent.innerHTML = '<div class="empty-state"><span class="material-symbols-rounded">search</span><h3>Search your library</h3><p>Find songs, artists, and albums</p></div>';
     return;
   }
@@ -3251,6 +3258,8 @@ function renderSearchContent(q) {
     s.artist.toLowerCase().includes(q) ||
     (s.album || '').toLowerCase().includes(q)
   );
+  
+  App.searchResults = m;
   
   if (!m.length) {
     DOM.searchContent.innerHTML = '<div class="empty-state"><span class="material-symbols-rounded">search_off</span><h3>No results</h3><p>Try a different search term</p></div>';
@@ -3378,6 +3387,7 @@ function renderHome(el) {
 function renderLibrary(el) {
   DOM.viewTitle.textContent = 'Library';
   const sorted = [...App.songs].sort((a, b) => a.title.localeCompare(b.title));
+  App.librarySortedSongs = sorted;
   
   el.innerHTML = `<div class="content-wrapper">
     <div class="filter-bar">
@@ -3688,16 +3698,19 @@ function renderPlaylistDetail(el) {
         <h1>${esc(p.name)}</h1>
         <p>${songs.length} songs</p>
         <div class="detail-actions">
-          <button class="btn btn-primary" data-action="play-playlist">
-            <span class="material-symbols-rounded" style="font-size:20px;margin-right:6px;">play_arrow</span>Play All
-          </button>
-          <button class="btn btn-ghost" data-action="add-songs" style="padding:15px 28px;">
-            <span class="material-symbols-rounded" style="font-size:20px;margin-right:6px;">add</span>Add Songs
-          </button>
-          ${!isFav ? `<button class="btn btn-ghost" data-action="delete-playlist" style="color:var(--error);">
-            <span class="material-symbols-rounded" style="font-size:20px;margin-right:6px;">delete</span>Delete
-          </button>` : ''}
-        </div>
+  <button class="btn btn-primary" data-action="play-playlist">
+  <span class="material-symbols-rounded" style="font-size:20px;margin-right:6px;">play_arrow</span>Play All
+</button>
+<button class="btn btn-secondary" data-action="add-songs" style="padding:15px 28px;">
+  <span class="material-symbols-rounded" style="font-size:20px;margin-right:6px;">add</span>Add Songs
+</button>
+${!isFav ? `<button class="btn btn-secondary" data-action="rename-playlist" style="padding:15px 28px;">
+  <span class="material-symbols-rounded" style="font-size:20px;margin-right:6px;">edit</span>Rename
+</button>
+<button class="btn btn-ghost" data-action="delete-playlist" style="color:var(--error);">
+  <span class="material-symbols-rounded" style="font-size:20px;margin-right:6px;">delete</span>Delete
+</button>` : ''}
+</div>
       </div>
     </div>
     ${songs.length ? `<div class="song-list">${songs.map((s, i) => songItemHTML(s, i, true, isFav)).join('')}</div>` : '<div class="empty-state"><span class="material-symbols-rounded">queue_music</span><h3>Empty playlist</h3><p>Tap "Add Songs" to add music</p></div>'}
@@ -4001,8 +4014,17 @@ function bindContentEvents(container, songs) {
       } else if (a === 'play-playlist' && App.detailPlaylist) {
         const ps = App.detailPlaylist.songIds.map(id => App.songs.find(s => s.id === id)).filter(Boolean);
         if (ps.length) playQueue(ps, 0, `Playlist: ${App.detailPlaylist.name}`);
-      } else if (a === 'add-songs' && App.detailPlaylist) openAddSongsModal(App.detailPlaylist);
-      else if (a === 'delete-playlist' && App.detailPlaylist) {
+    } else if (a === 'add-songs' && App.detailPlaylist) openAddSongsModal(App.detailPlaylist);
+else if (a === 'rename-playlist' && App.detailPlaylist) {
+  const newName = prompt('Rename playlist:', App.detailPlaylist.name);
+  if (newName && newName.trim() && newName.trim() !== App.detailPlaylist.name) {
+    App.detailPlaylist.name = newName.trim();
+    await dbPut('playlists', App.detailPlaylist);
+    DOM.viewTitle.textContent = newName.trim();
+    renderPlaylistDetail(container);
+    showSnackbar('Playlist renamed');
+  }
+} else if (a === 'delete-playlist' && App.detailPlaylist) {
         if (confirm(`Delete "${App.detailPlaylist.name}"?`)) {
           await dbDelete('playlists', App.detailPlaylist.id);
           App.playlists = App.playlists.filter(x => x.id !== App.detailPlaylist.id);
@@ -4028,19 +4050,20 @@ function bindContentEvents(container, songs) {
     }
     
     const sortBtn = t.closest('[data-sort]');
-    if (sortBtn) {
-      container.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
-      sortBtn.classList.add('active');
-      let s = [...App.songs];
-      const sort = sortBtn.dataset.sort;
-      if (sort === 'title') s.sort((a, b) => a.title.localeCompare(b.title));
-      else if (sort === 'artist') s.sort((a, b) => a.artist.localeCompare(b.artist));
-      else if (sort === 'album') s.sort((a, b) => (a.album || '').localeCompare(b.album || ''));
-      else if (sort === 'recent') s.sort((a, b) => b.dateAdded - a.dateAdded);
-      const l = container.querySelector('#lib-songs');
-      if (l) l.innerHTML = s.map((sg, i) => songItemHTML(sg, i)).join('');
-      return;
-    }
+if (sortBtn) {
+  container.querySelectorAll('.filter-chip').forEach(c => c.classList.remove('active'));
+  sortBtn.classList.add('active');
+  let s = [...App.songs];
+  const sort = sortBtn.dataset.sort;
+  if (sort === 'title') s.sort((a, b) => a.title.localeCompare(b.title));
+  else if (sort === 'artist') s.sort((a, b) => a.artist.localeCompare(b.artist));
+  else if (sort === 'album') s.sort((a, b) => (a.album || '').localeCompare(b.album || ''));
+  else if (sort === 'recent') s.sort((a, b) => b.dateAdded - a.dateAdded);
+  App.librarySortedSongs = s;
+  const l = container.querySelector('#lib-songs');
+  if (l) l.innerHTML = s.map((sg, i) => songItemHTML(sg, i)).join('');
+  return;
+}
     
     const nav = t.closest('[data-nav]');
     if (nav) { setView(nav.dataset.nav); return; }
@@ -4196,13 +4219,23 @@ function bindContentEvents(container, songs) {
     }
     
     const songItem = t.closest('.song-item[data-song-id]');
-    if (songItem && !t.closest('.song-actions')) {
-      const s = App.songs.find(x => x.id === songItem.dataset.songId);
-      if (s) {
-        const idx = songs.indexOf(s);
-        playQueue(songs.length ? songs : [s], idx >= 0 ? idx : 0, App.queueContext || 'Library');
-      }
+if (songItem && !t.closest('.song-actions')) {
+  const s = App.songs.find(x => x.id === songItem.dataset.songId);
+  if (s) {
+    let queueSongs = songs;
+    let context = App.queueContext || 'Library';
+    
+    if (App.activeTab === 'search' && App.searchResults.length) {
+      queueSongs = App.searchResults;
+      context = 'Search';
+    } else if (App.currentView === 'library' && App.librarySortedSongs.length) {
+      queueSongs = App.librarySortedSongs;
     }
+    
+    const idx = queueSongs.indexOf(s);
+    playQueue(queueSongs.length ? queueSongs : [s], idx >= 0 ? idx : 0, context);
+  }
+}
   };
 }
 
@@ -4588,15 +4621,13 @@ function handleKB(e) {
   switch (e.code) {
     case 'Space': e.preventDefault(); togglePlay(); break;
     case 'ArrowRight':
-      e.preventDefault();
-      if (e.shiftKey) playNext();
-      else if (App.audio.duration) App.audio.currentTime = Math.min(App.audio.duration, App.audio.currentTime + 5);
-      break;
-    case 'ArrowLeft':
-      e.preventDefault();
-      if (e.shiftKey) playPrev();
-      else App.audio.currentTime = Math.max(0, App.audio.currentTime - 5);
-      break;
+  e.preventDefault();
+  if (App.audio.duration) App.audio.currentTime = Math.min(App.audio.duration, App.audio.currentTime + 5);
+  break;
+case 'ArrowLeft':
+  e.preventDefault();
+  App.audio.currentTime = Math.max(0, App.audio.currentTime - 5);
+  break;
     case 'ArrowUp':
       e.preventDefault();
       App.volume = Math.min(1, App.volume + 0.05);
@@ -4617,9 +4648,10 @@ function handleKB(e) {
       break;
     case 'KeyS': e.preventDefault(); toggleSearchTab(); break;
     case 'KeyQ': e.preventDefault(); toggleQueueTab(); break;
-    case 'KeyF': e.preventDefault(); if (App.currentSong) toggleFavorite(App.currentSong.id); break;
+    case 'KeyN': e.preventDefault(); playNext(); break;
+    case 'KeyB': e.preventDefault(); playPrev(); break;
     case 'KeyM': e.preventDefault(); App.audio.muted = !App.audio.muted; updateVolIcon(); break;
-    case 'KeyN':
+    case 'KeyF':
       e.preventDefault();
       if (DOM.nowPlaying.classList.contains('visible')) {
         DOM.nowPlaying.classList.remove('visible');
@@ -4639,7 +4671,6 @@ function handleKB(e) {
       break;
   }
 }
-
 window.DEBUG = {
   get App() { return App; },
   getArtists() { return getUniqueArtists(); },
